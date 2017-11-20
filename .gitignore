@@ -3,5 +3,6 @@
 /lib
 *.cmd
 *.gpkg
+*.gpkg-*
 *.json
 .Python
