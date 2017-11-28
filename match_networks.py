@@ -1,23 +1,8 @@
-# from qgis.core import QgsProject
+import time
+from collections import defaultdict, namedtuple
 from qgis.core import QgsApplication, QgsVectorLayer, QgsGeometry, \
     QgsSpatialIndex, QgsField, edit
 from PyQt5.QtCore import QVariant
-
-
-def average_distance(source_feature, target_feature):
-    source = source_feature.geometry()
-    target = target_feature.geometry()
-
-    distances = [(i, target.distance(QgsGeometry(vertex)),
-                 source.distanceToVertex(i))
-                 for (i, vertex) in enumerate(source.vertices())]
-
-    total = 0
-    for (i, t, l) in distances[1:]:
-        (pi, pt, pl) = distances[i - 1]
-        total += (t + pt) * (l - pl) / 2
-
-    return total / distances[-1][2]
 
 
 class EdgeNetwork(object):
@@ -26,11 +11,24 @@ class EdgeNetwork(object):
         self._layer = QgsVectorLayer(src)
         self._map = {}
         self._index = QgsSpatialIndex()
+        self._node_edges = defaultdict(set)
+        self._edge_nodes = {}
         self._matches = {}
 
         for feature in self._layer.getFeatures():
             self._map[feature.id()] = feature
             self._index.insertFeature(feature)
+
+        for feature in self._layer.getFeatures():
+            fid = feature.id()
+            start = feature.geometry().constGet().startPoint()
+            end = feature.geometry().constGet().endPoint()
+            start_coords = (start.x(), start.y())
+            end_coords = (end.x(), end.y())
+
+            self._node_edges[start_coords].add(fid)
+            self._node_edges[end_coords].add(fid)
+            self._edge_nodes[fid] = [start_coords, end_coords]
 
     def _has_field(self, field_name):
         return field_name in [f.name() for f in self._layer.fields()]
@@ -60,36 +58,14 @@ class EdgeNetwork(object):
         bbox = feature.geometry().boundingBox().buffered(distance)
         return [self._map[fid] for fid in self._index.intersects(bbox)]
 
-    def neighbors(self, feature):
-        return [n for n in self.near(feature, 0)
-                if feature.geometry().touches(n.geometry())
-                or n.id() == feature.id()]
+    def neighbors(self, fid):
+        neighbors = set()
+        for node in self._edge_nodes.get(fid, []):
+            neighbors |= set(self._node_edges[node])
+        neighbors.remove(fid)
+        return neighbors
 
-    def is_matched(self, feature):
-        return feature.id() in self._matches
-
-    def match(self, self_feature, other_feature):
-        if self_feature.id() not in self._matches:
-            self._matches[self_feature.id()] = []
-
-        self._matches[self_feature.id()].append(other_feature.id())
-
-    def matches(self, self_feature, other_feature):
-        return other_feature.id() in self._matches.get(self_feature.id(), [])
-
-    def get_matches(self, feature):
-        return self._matches.get(feature.id(), [])
-
-    def neighbors_match(self, self_feature, other_feature, other_network):
-        self_neighbors = self.neighbors(self_feature)
-        other_neighbors = other_network.neighbors(other_feature)
-        for self_neighbor in self_neighbors:
-            for other_neighbor in other_neighbors:
-                if self.matches(self_neighbor, other_neighbor):
-                    return True
-        return False
-
-    def write_matches(self):
+    def write_matches(self, match_dict):
         with edit(self._layer):
             if not self._has_field('matches'):
                 self._add_fields([
@@ -102,52 +78,96 @@ class EdgeNetwork(object):
             count_idx = provider.fieldNameIndex('matches_count')
 
             changes = {}
-            for feature in self._layer.getFeatures():
-                matches = self.get_matches(feature)
+            for fid in self._map.keys():
+                matches = match_dict[fid]
                 feature_changes = {}
                 feature_changes[matches_idx] = \
                     ', '.join([str(m) for m in matches])
                 feature_changes[count_idx] = len(matches)
-                changes[feature.id()] = feature_changes
+                changes[fid] = feature_changes
 
             provider.changeAttributeValues(changes)
 
+
+def max_distance(source_feature, target_feature):
+    source = source_feature.geometry()
+    target = target_feature.geometry()
+    distance = 0
+    for vertex in source.vertices():
+        vertex_distance = QgsGeometry(vertex).distance(target)
+        distance = max(distance, vertex_distance)
+    return distance
+
+
+def neighbors_mismatch(matches, self_neighbors, other_neighbors):
+    for neighbor in self_neighbors:
+        if matches[neighbor].isdisjoint(other_neighbors):
+            return True
+    return False
+
+
+DISTANCE = 50
+Candidate = namedtuple('Candidate', ['a', 'b', 'ab', 'ba'])
 
 if __name__ == '__main__':
     qgs = QgsApplication([], False)
     qgs.initQgis()
 
     print('Creating networks...')
+    time1 = time.time()
     a_net = EdgeNetwork('network.gpkg|layername=a_edge')
     b_net = EdgeNetwork('network.gpkg|layername=b_edge')
+    time2 = time.time()
+    print('Created networks in %0.3f sec' % (time2 - time1,))
 
-    print('Matching edges by similarity...')
-    for a_edge in a_net.unmatched():
-        for b_edge in b_net.near(a_edge, 25):
-            if b_net.is_matched(b_edge):
-                continue
-            if a_edge.geometry().hausdorffDistance(b_edge.geometry()) <= 25:
-                a_net.match(a_edge, b_edge)
-                b_net.match(b_edge, a_edge)
-                break
+    print('Finding candidates...')
+    time1 = time.time()
+    candidates = []
+    for a in a_net.unmatched():
+        for b in b_net.near(a, DISTANCE):
+            ab = max_distance(a, b)
+            ba = max_distance(b, a)
+            if ab <= DISTANCE or ba <= DISTANCE:
+                candidates.append(Candidate(a.id(), b.id(), ab, ba))
+    time2 = time.time()
+    print('Found candidates in %0.3f sec' % (time2 - time1,))
 
-    print('Matching edges by connectivity...')
+    print('Matching candidates...')
+    time1 = time.time()
+    candidates.sort(key=lambda c: -max(c.ab, c.ba))
+    a_match = set()
+    b_match = set()
+    ab_match = defaultdict(set)
+    ba_match = defaultdict(set)
+    match_count = 0
 
-    rescan = True
-    while rescan:
-        print('Scanning unmatched...')
-        rescan = False
-        for a_edge in a_net.unmatched():
-            for b_edge in b_net.near(a_edge, 25):
-                if a_net.neighbors_match(a_edge, b_edge, b_net) and (
-                        average_distance(a_edge, b_edge) <= 25 or
-                        average_distance(b_edge, a_edge) <= 25):
-                    a_net.match(a_edge, b_edge)
-                    b_net.match(b_edge, a_edge)
-                    rescan = True
+    while candidates:
+        candidate = candidates.pop()
+        if candidate.a in a_match or candidate.b in b_match:
+            continue
+        a_neighbors = a_net.neighbors(candidate.a) & a_match
+        b_neighbors = b_net.neighbors(candidate.b) & b_match
+        if neighbors_mismatch(ab_match, a_neighbors, b_neighbors) or \
+                neighbors_mismatch(ba_match, b_neighbors, a_neighbors):
+            continue
+
+        if candidate.ab < DISTANCE and candidate.ba < DISTANCE:
+            print('Matched: %i (%0.1f) -> %i (%0.1f)' % (
+                candidate.a, candidate.ab, candidate.b, candidate.ba))
+            match_count += 1
+            a_match.add(candidate.a)
+            b_match.add(candidate.b)
+            ab_match[candidate.a].add(candidate.b)
+            ba_match[candidate.b].add(candidate.a)
+
+    time2 = time.time()
+    print('Matched %i candidates in %0.3f sec' % (match_count, time2 - time1,))
 
     print('Writing matches...')
-    a_net.write_matches()
-    b_net.write_matches()
+    time1 = time.time()
+    a_net.write_matches(ab_match)
+    b_net.write_matches(ba_match)
+    time2 = time.time()
+    print('Wrote matches in %0.3f sec' % (time2 - time1,))
 
     qgs.exitQgis()
