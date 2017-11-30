@@ -201,6 +201,9 @@ class Matcher(object):
         yield (self._a_network, self._b_network)
         yield (self._b_network, self._a_network)
 
+    def _choose(self, network, a, b):
+        return a if network == self._a_network else b
+
     def _next_iteration(self):
         n = self._iterations - 1
         self._distance += float(self._max_distance - self._min_distance) / n
@@ -218,9 +221,12 @@ class Matcher(object):
         return result
 
     def _record_edge_merger(self, network, new_eid, old_eids):
-        fid_map = self._a_edge_fid if network == self._a_network \
-            else self._b_edge_fid
+        fid_map = self._choose(network, self._a_edge_fid, self._b_edge_fid)
         fid_map[new_eid] = self._consolidate_eids(fid_map, old_eids)
+
+    def _get_unmatched_nids(self, network):
+        node_matches = self._choose(network, self._ab_node, self._ba_node)
+        return set(network.nids()) - set(node_matches.keys())
 
     # Step 1
     def _remove_no_candidates(self):
@@ -229,7 +235,7 @@ class Matcher(object):
         edge_count = 0
 
         for (network, other_network) in self._networks():
-            for nid in list(network.nids()):
+            for nid in self._get_unmatched_nids(network):
                 node = network.get_node(nid)
                 bbox = node.geometry().boundingBox().buffered(
                     self._max_distance)
@@ -248,7 +254,7 @@ class Matcher(object):
         print('Merging continuous edges...')
         merge_count = 0
         for (network, other_network) in self._networks():
-            for nid in list(network.nids()):
+            for nid in self._get_unmatched_nids(network):
                 eids = network.get_node_eids(nid)
                 # Don't try to merge if...
                 # More than two edges at this node
