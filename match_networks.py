@@ -1,7 +1,7 @@
 import time
 from collections import defaultdict
 from qgis.core import QgsApplication, QgsVectorLayer, QgsGeometry, \
-    QgsSpatialIndex, QgsField, QgsRectangle, edit, QgsFeature
+    QgsSpatialIndex, QgsField, edit, QgsFeature
 from PyQt5.QtCore import QVariant
 
 
@@ -12,7 +12,6 @@ class Network(object):
         self._layer = QgsVectorLayer(path)
 
         self._next_edge_id = -1
-        self._edge_fid_map = {}
         self._edge_map = dict([(f.id(), f) for f in self._layer.getFeatures()])
         self._edge_index = QgsSpatialIndex()
         self._edge_nodes = {}
@@ -50,7 +49,6 @@ class Network(object):
                 endpoints.append(node_id)
                 self._node_edges[node_id].add(fid)
 
-            self._edge_fid_map[fid] = set([fid])
             self._edge_index.insertFeature(feature)
             self._edge_nodes[fid] = endpoints
 
@@ -107,7 +105,6 @@ class Network(object):
         for nid in list(self.get_edge_nids(eid)):
             self._node_edges[nid] -= set([eid])
         self._edge_index.deleteFeature(edge)
-        del self._edge_fid_map[eid]
         del self._edge_nodes[eid]
         del self._edge_map[eid]
 
@@ -141,11 +138,11 @@ class Network(object):
 
         self.remove_node(old_nid)
         self._edge_map[new_eid] = feature
-        self._edge_fid_map[new_eid] = set([m_eid, n_eid])
         self._edge_index.insertFeature(feature)
         self._edge_nodes[new_eid] = endpoints
         for nid in endpoints:
             self._node_edges[nid].add(new_eid)
+        return new_eid
 
     def write_matches(self, match_dict):
         with edit(self._layer):
@@ -181,6 +178,14 @@ class Matcher(object):
         self._a_network = a_network
         self._b_network = b_network
 
+        self._a_edge_fid = {}
+        self._b_edge_fid = {}
+
+        self._ab_node = {}
+        self._ba_node = {}
+        self._ab_edge = {}
+        self._ba_edge = {}
+
         self._min_distance = kwargs.get('min_distance', 20)
         self._max_distance = kwargs.get('max_distance', 100)
         self._min_angle = kwargs.get('min_angle', 5)
@@ -201,6 +206,21 @@ class Matcher(object):
         self._distance += float(self._max_distance - self._min_distance) / n
         self._angle += float(self._max_angle - self._min_angle) / n
         self._iteration += 1
+
+    def _consolidate_eids(self, fid_map, eids):
+        result = set()
+        for eid in eids:
+            if eid in fid_map:
+                result |= self._consolidate_eids(fid_map, [eid])
+                del fid_map[eid]
+            else:
+                result.add(eid)
+        return result
+
+    def _record_edge_merger(self, network, new_eid, old_eids):
+        fid_map = self._a_edge_fid if network == self._a_network \
+            else self._b_edge_fid
+        fid_map[new_eid] = self._consolidate_eids(fid_map, old_eids)
 
     # Step 1
     def _remove_no_candidates(self):
@@ -242,7 +262,8 @@ class Matcher(object):
                 nid_sets = [set(network.get_edge_nids(eid)) for eid in eids]
                 if nid_sets[0] == nid_sets[1]:
                     continue
-                network.merge_edges(*eids)
+                new_eid = network.merge_edges(*eids)
+                self._record_edge_merger(network, new_eid, eids)
                 merge_count += 1
 
         if merge_count > 0:
