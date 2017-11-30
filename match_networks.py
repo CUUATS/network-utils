@@ -1,311 +1,298 @@
-import fiona
+import time
 from collections import defaultdict
-from shapely.geometry import shape, Point, LineString, MultiLineString
-from rtree import index
-
-
-class Edge(object):
-
-    @classmethod
-    def from_feature(cls, network, feature):
-        return cls(network, int(feature['id']), shape(feature['geometry']))
-
-    def __init__(self, network, id, geometry, start_node=None, end_node=None):
-        self.network = network
-        self.id = id
-        self.geometry = geometry
-        self.start_node = start_node
-        self.end_node = end_node
-
-    def __repr__(self):
-        return '<Edge: %i>' % (self.id,)
-
-    @property
-    def start_coords(self):
-        return self.geometry.coords[0]
-
-    @property
-    def end_coords(self):
-        return self.geometry.coords[-1]
-
-    def other_node(self, node):
-        if self.start_node == node:
-            return self.end_node
-        return self.start_node
-
-
-class Node(object):
-
-    def __init__(self, network, id, geometry=None, edges=None):
-        self.network = network
-        self.id = id
-        self.geometry = geometry
-        self.edges = edges or []
-
-    def __repr__(self):
-        return '<Node: %i>' % (self.id,)
-
-    def distance(self, other):
-        return self.geometry.distance(other.geometry)
-
-    def to_feature(self):
-        return {
-            'geometry': self.geometry,
-            'properties': {
-                'id': self.id
-            }
-        }
+from qgis.core import QgsApplication, QgsVectorLayer, QgsGeometry, \
+    QgsSpatialIndex, QgsField, QgsRectangle, edit, QgsFeature
+from PyQt5.QtCore import QVariant
 
 
 class Network(object):
 
-    def __init__(self, path, layer_name):
-        self.next_node_id = 1
-        self.edges = self._get_edges(path, layer_name)
-        self.nodes = self._get_nodes()
-        self.nodes_idx = self._make_spatial_index(self.nodes)
+    def __init__(self, path):
+        self._path = path
+        self._layer = QgsVectorLayer(path)
+
+        self._next_edge_id = -1
+        self._edge_fid_map = {}
+        self._edge_map = dict([(f.id(), f) for f in self._layer.getFeatures()])
+        self._edge_index = QgsSpatialIndex()
+        self._edge_nodes = {}
+
+        self._node_map = {}
+        self._node_index = QgsSpatialIndex()
+        self._node_edges = defaultdict(set)
+
+        self._build_indexes()
 
     def __repr__(self):
-        return '<Network>'
+        return '<Network %s>' % (self._path,)
 
-    def _get_edges(self, path, layer_name):
-        with fiona.open(path, layer=layer_name) as source:
-            self.meta = source.meta
-            return [Edge.from_feature(self, f) for f in source]
+    def _build_indexes(self):
+        next_node_id = 1
+        coords_node = {}
 
-    def _get_nodes(self):
-        def make_node():
-            node = Node(self, self.next_node_id)
-            self.next_node_id += 1
-            return node
+        for (fid, feature) in self._edge_map.items():
+            fid = feature.id()
+            ls = feature.geometry().constGet()
+            endpoints = []
+            for point in [ls.startPoint(), ls.endPoint()]:
+                coords = (point.x(), point.y())
+                node_id = coords_node.get(coords, None)
 
-        coords_node = defaultdict(make_node)
-        for edge in self.edges:
-            for position in ['start', 'end']:
-                coords = getattr(edge, position + '_coords')
-                node = coords_node[coords]
-                setattr(edge, position + '_node', node)
-                if not node.geometry:
-                    node.geometry = Point(coords)
-                node.edges.append(edge)
+                if node_id is None:
+                    node_id = next_node_id
+                    next_node_id += 1
+                    coords_node[coords] = node_id
+                    node_feature = self._make_feature(
+                        node_id, QgsGeometry(point))
+                    self._node_map[node_id] = node_feature
+                    self._node_index.insertFeature(node_feature)
 
-        return list(coords_node.values())
+                endpoints.append(node_id)
+                self._node_edges[node_id].add(fid)
 
-    def _make_spatial_index(self, items):
-        idx = index.Index()
-        for (item_idx, item) in enumerate(items):
-            idx.insert(item_idx, item.geometry.bounds)
-        return idx
+            self._edge_fid_map[fid] = set([fid])
+            self._edge_index.insertFeature(feature)
+            self._edge_nodes[fid] = endpoints
 
-    def get_nearest_node(self, node, threshold=0):
-        nearest = [self.nodes[i] for i in
-                   self.nodes_idx.nearest(node.geometry.bounds, 1)]
+        self._next_edge_id = fid + 1
 
-        if not nearest or \
-                (threshold > 0 and nearest[0].distance(node) > threshold):
-            return None
+    def _has_field(self, field_name):
+        return field_name in [f.name() for f in self._layer.fields()]
 
-        return nearest[0]
+    def _add_fields(self, fields):
+        self._layer.dataProvider().addAttributes(
+            [QgsField(fn, ft) for (fn, ft) in fields])
 
+    def _make_feature(self, fid, geometry):
+        feature = QgsFeature(fid)
+        feature.setGeometry(geometry)
+        return feature
 
-class Matches(object):
+    def eids(self):
+        return self._edge_map.keys()
 
-    def __init__(self, a_network, b_network, attr):
-        self.a_network = a_network
-        self.b_network = b_network
-        self.a_map = self._get_id_map(getattr(a_network, attr))
-        # self.b_map = self._get_id_map(getattr(b_network, attr))
-        self.ab = {}
-        self.ba = {}
+    def nids(self):
+        return self._node_map.keys()
 
-    def _get_id_map(self, objs):
-        return dict([(obj.id, obj) for obj in objs])
+    def get_edge(self, eid):
+        return self._edge_map[eid]
 
-    def add(self, a, b):
-        if a.id not in self.ab:
-            self.ab[a.id] = []
+    def get_node(self, nid):
+        return self._node_map[nid]
 
-        if b.id not in self.ba:
-            self.ba[b.id] = []
+    def find_nids(self, bbox):
+        return self._node_index.intersects(bbox)
 
-        self.ab[a.id].append(b)
-        self.ba[b.id].append(a)
+    def find_eids(self, bbox):
+        return self._edge_index.intersects(bbox)
 
-    def get(self, obj):
-        if obj.network == self.a_network:
-            return self.ab.get(obj.id, [])
-        return self.ba.get(obj.id, [])
+    def get_edge_nids(self, eid):
+        return self._edge_nodes[eid]
 
-    def items(self):
-        for (a_id, b_list) in self.ab.items():
-            a = self.a_map[a_id]
-            for b in b_list:
-                yield (a, b)
+    def get_node_eids(self, nid):
+        return self._node_edges[nid]
 
-    def has_match(self, obj):
-        return len(self.get(obj)) > 0
+    def get_other_nid(self, eid, nid):
+        nids = self._edge_nodes[eid]
+        if nids[0] == nid:
+            return nids[1]
+        return nids[0]
 
-    def matches(self, obj, other):
-        return other in self.get(obj)
+    def is_loop(self, eid):
+        return len(set(self.get_edge_nids(eid))) == 1
 
+    def remove_edge(self, eid):
+        # print('Removing edge %i' % (eid,))
+        edge = self.get_edge(eid)
+        for nid in list(self.get_edge_nids(eid)):
+            self._node_edges[nid] -= set([eid])
+        self._edge_index.deleteFeature(edge)
+        del self._edge_fid_map[eid]
+        del self._edge_nodes[eid]
+        del self._edge_map[eid]
 
-class Sequence(object):
+    def remove_node(self, nid):
+        # print('Removing node %i' % (nid,))
+        node = self.get_node(nid)
+        for eid in list(self.get_node_eids(nid)):
+            self.remove_edge(eid)
+        self._node_index.deleteFeature(node)
+        del self._node_edges[nid]
+        del self._node_map[nid]
 
-    def __init__(self, start_node, end_node=None, edges=None):
-        self.start_node = start_node
-        self.end_node = end_node
-        self.edges = edges or []
+    def merge_edges(self, m_eid, n_eid):
+        m_nids = set(self.get_edge_nids(m_eid))
+        n_nids = set(self.get_edge_nids(n_eid))
+        shared_nids = m_nids & n_nids
 
-    def __repr__(self):
-        return '<Sequence: %i to %i>' % (
-            getattr(self.start_node, 'id', -1),
-            getattr(self.end_node, 'id', -1))
+        assert len(shared_nids) == 1, \
+            'Edges %i and %i do not share a common node' % (m_eid, n_eid)
 
-    @property
-    def count(self):
-        return len(self.edges)
+        old_nid = shared_nids.pop()
+        endpoints = list(m_nids ^ n_nids)
+        new_eid = self._next_edge_id
+        self._next_edge_id += 1
 
-    @property
-    def length(self):
-        return sum([e.geometry.length for e in self.edges])
+        m_edge = self.get_edge(m_eid)
+        n_edge = self.get_edge(n_eid)
+        geometry = m_edge.geometry().combine(n_edge.geometry())
+        geometry.mergeLines()
+        feature = self._make_feature(self._next_edge_id, geometry)
 
-    @property
-    def geometry(self):
-        return MultiLineString([e.geometry for e in self.edges])
+        self.remove_node(old_nid)
+        self._edge_map[new_eid] = feature
+        self._edge_fid_map[new_eid] = set([m_eid, n_eid])
+        self._edge_index.insertFeature(feature)
+        self._edge_nodes[new_eid] = endpoints
+        for nid in endpoints:
+            self._node_edges[nid].add(new_eid)
 
-    def add(self, edge):
-        end_node = edge.other_node(self.end_node or self.start_node)
-        return Sequence(self.start_node, end_node, self.edges + [edge])
+    def write_matches(self, match_dict):
+        with edit(self._layer):
+            if not self._has_field('matches'):
+                self._add_fields([
+                    ('matches', QVariant.String),
+                    ('matches_count', QVariant.Int)])
+                self._layer.updateFields()
 
-    def includes(self, edge):
-        return edge in self.edges
+            provider = self._layer.dataProvider()
+            matches_idx = provider.fieldNameIndex('matches')
+            count_idx = provider.fieldNameIndex('matches_count')
 
-    def hdistance(self, other):
-        return self.geometry.hausdorff_distance(other.geometry)
+            changes = {}
+            for fid in self._map.keys():
+                matches = match_dict[fid]
+                feature_changes = {}
+                feature_changes[matches_idx] = \
+                    ', '.join([str(m) for m in matches])
+                feature_changes[count_idx] = len(matches)
+                changes[fid] = feature_changes
+
+            provider.changeAttributeValues(changes)
 
 
 class Matcher(object):
 
-    INITIAL_NODE_THRESHOLD = 50
-    EDGE_SEARCH_LIMIT = 3
-    EDGE_MAX_HAUSDORFF_DISTANCE = 100
-
-    def __init__(self, a_network, b_network):
+    def __init__(self, a_network, b_network, **kwargs):
         for net in [a_network, b_network]:
             assert isinstance(net, Network), \
                 'arguments must be an instances of Network'
 
-        self.a_network = a_network
-        self.b_network = b_network
-        self.node_matches = Matches(a_network, b_network, 'nodes')
-        self.edge_matches = Matches(a_network, b_network, 'edges')
+        self._a_network = a_network
+        self._b_network = b_network
 
-    def _match_nodes_by_proximity(self, max_dist=0):
-        for a_node in self.a_network.nodes:
-            b_node = self.b_network.get_nearest_node(a_node, max_dist)
-            if b_node is not None and self.a_network.get_nearest_node(
-                    b_node, max_dist) == a_node:
-                self.node_matches.add(a_node, b_node)
+        self._min_distance = kwargs.get('min_distance', 20)
+        self._max_distance = kwargs.get('max_distance', 100)
+        self._min_angle = kwargs.get('min_angle', 5)
+        self._max_angle = kwargs.get('max_angle', 45)
+        self._iterations = kwargs.get('iterations', 5)
 
-    def _iter_possible_edge_sequences(self, node, limit, seq=None):
-        if seq is None:
-            seq = Sequence(node)
+        self._distance = self._min_distance
+        self._angle = self._min_angle
+        self._iteration = 1
+        self._dirty = True
 
-        for edge in sorted(node.edges, key=lambda e: e.geometry.length):
-            if seq.includes(edge) or self.edge_matches.has_match(edge):
-                continue
+    def _networks(self):
+        yield (self._a_network, self._b_network)
+        yield (self._b_network, self._a_network)
 
-            new_seq = seq.add(edge)
-            if self.node_matches.has_match(new_seq.end_node):
-                yield new_seq
-            elif limit > 0:
-                for child_seq in self._iter_possible_edge_sequences(
-                        new_seq.end_node, limit - 1, new_seq):
-                    yield child_seq
+    def _next_iteration(self):
+        n = self._iterations - 1
+        self._distance += float(self._max_distance - self._min_distance) / n
+        self._angle += float(self._max_angle - self._min_angle) / n
+        self._iteration += 1
 
-    def _match_edges_from_matched_nodes(self, search_limit, max_distance):
-        for (a_node, b_node) in self.node_matches.items():
-            for a_seq in self._iter_possible_edge_sequences(
-                    a_node, search_limit):
-                for b_seq in self._iter_possible_edge_sequences(
-                        b_node, search_limit):
-                    if self.node_matches.matches(
-                            a_seq.end_node, b_seq.end_node):
-                        if a_seq.hdistance(b_seq) < max_distance:
-                            self._match_sequence_edges(a_seq, b_seq)
+    # Step 1
+    def _remove_no_candidates(self):
+        print('Removing no-candidate nodes and edges...')
+        node_count = 0
+        edge_count = 0
 
-    def _match_sequence_edges(self, a_seq, b_seq):
-        # TODO: This is not really correct. We need to compare the edge
-        # geometries in the sequences and only match ones where they are
-        # parallel to each other.
-        for a_edge in a_seq.edges:
-            for b_edge in b_seq.edges:
-                self.edge_matches.add(a_edge, b_edge)
+        for (network, other_network) in self._networks():
+            for nid in list(network.nids()):
+                node = network.get_node(nid)
+                bbox = node.geometry().boundingBox().buffered(
+                    self._max_distance)
+                other_eids = other_network.find_eids(bbox)
+                if not other_eids:
+                    edge_count += len(network.get_node_eids(nid))
+                    network.remove_node(nid)
+                    node_count += 1
 
-    def export_node_match_lines(self, out_path, out_layer):
-        meta = self.a_network.meta.copy()
-        meta['schema'] = {
-            'geometry': 'LineString',
-            'properties': {
-                'a_node': 'int',
-                'b_node': 'int'
-            }
-        }
-        with fiona.open(out_path, 'w', layer=out_layer, **meta) as dest:
-            for (a, b) in self.node_matches.items():
-                geom = LineString([a.geometry, b.geometry])
-                dest.write({
-                    'geometry': {
-                        'type': 'LineString',
-                        'coordinates': list(geom.coords)
-                    },
-                    'properties': {
-                        'a_node': a.id,
-                        'b_node': b.id
-                    }
-                })
+        if node_count > 0:
+            self._dirty = True
+        print('Removed %i nodes and %i edges' % (node_count, edge_count))
 
-    def export_edge_match_results(self, out_path, out_layer, network):
-        meta = network.meta.copy()
-        meta['schema'] = {
-            'geometry': 'LineString',
-            'properties': {
-                'id': 'int',
-                'match_count': 'int',
-                'match_ids': 'str',
-            }
-        }
-        with fiona.open(out_path, 'w', layer=out_layer, **meta) as dest:
-            for edge in network.edges:
-                matches = self.edge_matches.get(edge)
-                dest.write({
-                    'geometry': {
-                        'type': 'LineString',
-                        'coordinates': list(edge.geometry.coords)
-                    },
-                    'properties': {
-                        'id': edge.id,
-                        'match_count': len(matches),
-                        'match_ids': ', '.join([str(m.id) for m in matches])
-                    }
-                })
+    # Step 2
+    def _merge_continuous_edges(self):
+        print('Merging continuous edges...')
+        merge_count = 0
+        for (network, other_network) in self._networks():
+            for nid in list(network.nids()):
+                eids = network.get_node_eids(nid)
+                # Don't try to merge if...
+                # More than two edges at this node
+                if len(eids) != 2:
+                    continue
+                # Any of the edges are loops
+                if True in [network.is_loop(eid) for eid in eids]:
+                    continue
+                # Both edges form a loop
+                # TODO: How to deal with this? Remove them?
+                nid_sets = [set(network.get_edge_nids(eid)) for eid in eids]
+                if nid_sets[0] == nid_sets[1]:
+                    continue
+                network.merge_edges(*eids)
+                merge_count += 1
+
+        if merge_count > 0:
+            self._dirty = True
+        print('Merged %i edge pairs' % (merge_count,))
+
+    # Step 3
+    def _match_nodes_to_nodes(self):
+        print('Matching nodes to nodes...')
+        pass
+
+    # Step 4
+    def _match_edges_to_edges(self):
+        print('Matching edges to edges...')
+        pass
+
+    # Step 5
+    def _match_nodes_to_edges(self):
+        print('Matching nodes to edges...')
+        pass
 
     def match(self):
-        self._match_nodes_by_proximity(self.INITIAL_NODE_THRESHOLD)
-        self._match_edges_from_matched_nodes(
-            self.EDGE_SEARCH_LIMIT, self.EDGE_MAX_HAUSDORFF_DISTANCE)
+        while self._iteration <= self._iterations:
+            print('Starting iteration %i...' % (self._iteration))
+            self._dirty = True
+
+            while self._dirty:
+                self._dirty = False
+                self._remove_no_candidates()
+                self._merge_continuous_edges()
+                self._match_nodes_to_nodes()
+                self._match_edges_to_edges()
+                self._match_nodes_to_edges()
+
+            self._next_iteration()
 
 
 if __name__ == '__main__':
-    print('Creating networks...')
-    a_net = Network('network.gpkg', 'a_edge')
-    b_net = Network('network.gpkg', 'b_edge')
+    qgs = QgsApplication([], False)
+    qgs.initQgis()
 
-    print('Matching networks...')
+    print('Creating networks...')
+    time1 = time.time()
+    a_net = Network('network.gpkg|layername=a_edge')
+    b_net = Network('network.gpkg|layername=b_edge')
+    time2 = time.time()
+    print('Created networks in %0.3f sec' % (time2 - time1,))
+
+    print('Matching...')
     matcher = Matcher(a_net, b_net)
     matcher.match()
 
-    print('Exporting results...')
-    matcher.export_node_match_lines('matches.gpkg', 'node_matches')
-    matcher.export_edge_match_results('matches.gpkg', 'a_edge', a_net)
-    matcher.export_edge_match_results('matches.gpkg', 'b_edge', b_net)
+    qgs.exitQgis()
