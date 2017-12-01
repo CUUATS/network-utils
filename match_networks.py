@@ -232,7 +232,7 @@ class Matcher(object):
         result = set()
         for eid in eids:
             if eid in fid_map:
-                result |= self._consolidate_eids(fid_map, [eid])
+                result |= self._consolidate_eids(fid_map, fid_map[eid])
                 del fid_map[eid]
             else:
                 result.add(eid)
@@ -322,8 +322,10 @@ class Matcher(object):
                 nid_sets = [set(network.get_edge_nids(eid)) for eid in eids]
                 if nid_sets[0] == nid_sets[1]:
                     continue
+                # Merge the edges.
+                old_eids = eids.copy()
                 new_eid = network.merge_edges(*eids)
-                self._record_edge_merger(network, new_eid, eids)
+                self._record_edge_merger(network, new_eid, old_eids)
                 merge_count += 1
 
         if merge_count > 0:
