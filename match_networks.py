@@ -276,9 +276,15 @@ class Matcher(object):
         self._ab_node[a_nid] = b_nid
         self._ba_node[b_nid] = a_nid
 
+    def _set_edges_matched(self, a_eid, b_eid):
+        self._ab_edge[a_eid] = b_eid
+        self._ba_edge[b_eid] = a_eid
+        self._a_network.remove_edge(a_eid)
+        self._b_network.remove_edge(b_eid)
+
     # Step 1
     def _remove_no_candidates(self):
-        print('Removing no-candidate nodes and edges...')
+        print('\nRemoving no-candidate nodes and edges...')
         node_count = 0
         edge_count = 0
 
@@ -336,6 +342,7 @@ class Matcher(object):
                         self._nodes_can_match(a_nid, b_nid):
                     self._set_nodes_matched(a_nid, b_nid)
                     match_count += 1
+                    break
 
         if match_count > 0:
             self._dirty = True
@@ -344,7 +351,28 @@ class Matcher(object):
     # Step 4
     def _match_edges_to_edges(self):
         print('Matching edges to edges...')
-        pass
+        match_count = 0
+        for (a_nid, b_nid) in list(self._ab_node.items()):
+            for a_eid in list(self._a_network.get_node_eids(a_nid)):
+                a_other_nid = self._a_network.get_other_nid(a_eid, a_nid)
+                expected_b_other_nid = self._ab_node.get(a_other_nid, None)
+                if expected_b_other_nid is None:
+                    continue
+                for b_eid in list(self._b_network.get_node_eids(b_nid)):
+                    b_other_nid = self._b_network.get_other_nid(b_eid, b_nid)
+                    if b_other_nid != expected_b_other_nid:
+                        continue
+                    a_edge = self._a_network.get_edge(a_eid)
+                    b_edge = self._b_network.get_edge(b_eid)
+                    if a_edge.geometry().hausdorffDistance(b_edge.geometry()) \
+                            <= self._distance:
+                        self._set_edges_matched(a_eid, b_eid)
+                        match_count += 1
+                        break
+
+        if match_count > 0:
+            self._dirty = True
+        print('Matched %i edge pairs' % (match_count,))
 
     # Step 5
     def _match_nodes_to_edges(self):
@@ -353,7 +381,8 @@ class Matcher(object):
 
     def match(self):
         while self._iteration <= self._iterations:
-            print('[Iteration %i]' % (self._iteration))
+            print('\n[Distance: %0.1f, Angle: %0.1f]' % (
+                self._distance, self._angle))
             self._dirty = True
 
             while self._dirty:
