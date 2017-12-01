@@ -1,3 +1,4 @@
+import math
 import time
 from collections import defaultdict
 from qgis.core import QgsApplication, QgsVectorLayer, QgsGeometry, \
@@ -66,6 +67,19 @@ class Network(object):
         feature.setGeometry(geometry)
         return feature
 
+    def _vertex_id(self, eid, nid):
+        if self.get_edge_nids(eid)[0] == nid:
+            return 0
+        return self.get_edge(eid).geometry().constGet().nCoordinates() - 1
+
+    def _node_angle(self, eid, nid):
+        vid = self._vertex_id(eid, nid)
+        angle = self.get_edge(eid).geometry().angleAtVertex(vid) \
+            * 180 / math.pi
+        if vid > 0:
+            angle += 180 if angle < 180 else -180
+        return angle
+
     def eids(self):
         return self._edge_map.keys()
 
@@ -95,6 +109,10 @@ class Network(object):
         if nids[0] == nid:
             return nids[1]
         return nids[0]
+
+    def get_node_angles(self, nid):
+        eids = self.get_node_eids(nid)
+        return dict([(eid, self._node_angle(eid, nid)) for eid in eids])
 
     def is_loop(self, eid):
         return len(set(self.get_edge_nids(eid))) == 1
@@ -228,6 +246,36 @@ class Matcher(object):
         node_matches = self._choose(network, self._ab_node, self._ba_node)
         return set(network.nids()) - set(node_matches.keys())
 
+    def _angle_difference(self, a, b):
+        diff = abs(a - b)
+        return diff if diff <= 180 else 360 - diff
+
+    def _angle_sets_match(self, a_angles, b_angles):
+        if len(a_angles) != len(b_angles):
+            return False
+
+        matrix = [[self._angle_difference(a, b) <= self._angle
+                  for b in b_angles] for a in a_angles]
+
+        return all([True in r for r in matrix]) and \
+            all([True in c for c in zip(*matrix)])
+
+    def _nodes_can_match(self, a_nid, b_nid):
+        a_node = self._a_network.get_node(a_nid)
+        b_node = self._b_network.get_node(b_nid)
+
+        if a_node.geometry().distance(b_node.geometry()) > self._distance:
+            return False
+
+        a_angles = self._a_network.get_node_angles(a_nid)
+        b_angles = self._b_network.get_node_angles(b_nid)
+
+        return self._angle_sets_match(a_angles.values(), b_angles.values())
+
+    def _set_nodes_matched(self, a_nid, b_nid):
+        self._ab_node[a_nid] = b_nid
+        self._ba_node[b_nid] = a_nid
+
     # Step 1
     def _remove_no_candidates(self):
         print('Removing no-candidate nodes and edges...')
@@ -279,7 +327,19 @@ class Matcher(object):
     # Step 3
     def _match_nodes_to_nodes(self):
         print('Matching nodes to nodes...')
-        pass
+        match_count = 0
+        for a_nid in self._get_unmatched_nids(self._a_network):
+            a_node = self._a_network.get_node(a_nid)
+            bbox = a_node.geometry().boundingBox().buffered(self._distance)
+            for b_nid in self._b_network.find_nids(bbox):
+                if b_nid not in self._ba_node and \
+                        self._nodes_can_match(a_nid, b_nid):
+                    self._set_nodes_matched(a_nid, b_nid)
+                    match_count += 1
+
+        if match_count > 0:
+            self._dirty = True
+        print('Matched %i node pairs' % (match_count,))
 
     # Step 4
     def _match_edges_to_edges(self):
@@ -293,7 +353,7 @@ class Matcher(object):
 
     def match(self):
         while self._iteration <= self._iterations:
-            print('Starting iteration %i...' % (self._iteration))
+            print('[Iteration %i]' % (self._iteration))
             self._dirty = True
 
             while self._dirty:
