@@ -8,6 +8,11 @@ from PyQt5.QtCore import QVariant
 
 class Network(object):
 
+    FIELDS = [
+        ('matches', QVariant.String),
+        ('matches_count', QVariant.Int),
+        ('network_fid', QVariant.Int)]
+
     def __init__(self, path):
         self._path = path
         self._layer = QgsVectorLayer(path)
@@ -162,28 +167,31 @@ class Network(object):
             self._node_edges[nid].add(new_eid)
         return new_eid
 
-    def write_matches(self, match_dict):
+    def write_matches(self, match_dict, network_fids):
         with edit(self._layer):
-            if not self._has_field('matches'):
-                self._add_fields([
-                    ('matches', QVariant.String),
-                    ('matches_count', QVariant.Int)])
+            new_fields = [(fn, ft) for (fn, ft) in self.FIELDS
+                          if not self._has_field(fn)]
+            if new_fields:
+                self._add_fields(new_fields)
                 self._layer.updateFields()
 
             provider = self._layer.dataProvider()
             matches_idx = provider.fieldNameIndex('matches')
             count_idx = provider.fieldNameIndex('matches_count')
+            network_fid_idx = provider.fieldNameIndex('network_fid')
 
-            changes = {}
-            for fid in self._map.keys():
+            changes = defaultdict(dict)
+            for (fid, matches) in match_dict.items():
                 matches = match_dict[fid]
-                feature_changes = {}
-                feature_changes[matches_idx] = \
+                changes[fid][matches_idx] = \
                     ', '.join([str(m) for m in matches])
-                feature_changes[count_idx] = len(matches)
-                changes[fid] = feature_changes
+                changes[fid][count_idx] = len(matches)
 
-            provider.changeAttributeValues(changes)
+            for (network_fid, fids) in network_fids.items():
+                for fid in fids:
+                    changes[fid][network_fid_idx] = network_fid
+
+            provider.changeAttributeValues(dict(changes))
 
 
 class Matcher(object):
@@ -443,6 +451,23 @@ class Matcher(object):
 
             self._next_iteration()
 
+    def write_matches(self):
+        ab = {}
+        ba = {}
+
+        for (a_eid, b_eid) in self._ab_edge.items():
+            a_fids = self._a_edge_fid.get(a_eid, set([a_eid]))
+            b_fids = self._b_edge_fid.get(b_eid, set([b_eid]))
+
+            for a_fid in a_fids:
+                ab[a_fid] = b_fids
+
+            for b_fid in b_fids:
+                ba[b_fid] = a_fids
+
+        self._a_network.write_matches(ab, self._a_edge_fid)
+        self._b_network.write_matches(ba, self._a_edge_fid)
+
 
 if __name__ == '__main__':
     qgs = QgsApplication([], False)
@@ -461,5 +486,11 @@ if __name__ == '__main__':
     matcher.match()
     time2 = time.time()
     print('Matched networks in %0.3f sec' % (time2 - time1,))
+
+    print('Writing matches...')
+    time1 = time.time()
+    matcher.write_matches()
+    time2 = time.time()
+    print('Wrote matches in %0.3f sec' % (time2 - time1,))
 
     qgs.exitQgis()
