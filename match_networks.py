@@ -330,6 +330,11 @@ class Matcher(object):
                 nid_sets = [set(network.get_edge_nids(eid)) for eid in eids]
                 if nid_sets[0] == nid_sets[1]:
                     continue
+                # The other network has a node within the maximum distance
+                bbox = network.get_node(
+                    nid).geometry().boundingBox().buffered(self._max_distance)
+                if other_network.find_nids(bbox):
+                    continue
                 # Merge the edges.
                 old_eids = eids.copy()
                 new_eid = network.merge_edges(*eids)
