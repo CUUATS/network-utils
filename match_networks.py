@@ -152,7 +152,7 @@ class Network(object):
         n_edge = self.get_edge(n_eid)
         geometry = m_edge.geometry().combine(n_edge.geometry())
         geometry.mergeLines()
-        feature = self._make_feature(self._next_edge_id, geometry)
+        feature = self._make_feature(new_eid, geometry)
 
         self.remove_node(old_nid)
         self._edge_map[new_eid] = feature
@@ -379,7 +379,53 @@ class Matcher(object):
     # Step 5
     def _match_nodes_to_edges(self):
         print('Matching nodes to edges...')
-        pass
+        match_count = 0
+
+        for (network, other_network) in self._networks():
+            for nid in self._get_unmatched_nids(network):
+                node = network.get_node(nid)
+                bbox = node.geometry().boundingBox().buffered(
+                    self._max_distance)
+                eids = other_network.find_eids(bbox)
+                for eid in eids:
+                    node_geom = node.geometry()
+                    edge = other_network.get_edge(eid)
+                    edge_geom = edge.geometry()
+                    if node_geom.distance(edge_geom) > self._distance:
+                        continue
+
+                    edge_node_loc = edge_geom.lineLocatePoint(node_geom)
+                    edge_angle = edge_geom.interpolateAngle(
+                        edge_node_loc) * 180 / math.pi
+                    edge_angle_opp = edge_angle + 180 if edge_angle > 180 \
+                        else edge_angle - 180
+                    edge_angle_eid = None
+                    edge_angle_opp_eid = None
+
+                    node_angles = network.get_node_angles(nid)
+                    for (node_eid, angle) in node_angles.items():
+                        if self._angle_difference(edge_angle, angle) \
+                                <= self._angle:
+                            edge_angle_eid = node_eid
+                        elif self._angle_difference(edge_angle_opp, angle) \
+                                <= self._angle:
+                            edge_angle_opp_eid = node_eid
+
+                    if edge_angle_eid is not None \
+                            and edge_angle_opp_eid is not None:
+
+                        keep_eids = set([edge_angle_eid, edge_angle_opp_eid])
+                        remove_eids = set(node_angles.keys()) - keep_eids
+                        if remove_eids:
+                            for remove_eid in remove_eids:
+                                network.remove_edge(remove_eid)
+
+                            match_count += 1
+                            break
+
+        if match_count > 0:
+            self._dirty = True
+        print('Matched %i nodes to edges' % (match_count,))
 
     def match(self):
         while self._iteration <= self._iterations:
@@ -410,7 +456,10 @@ if __name__ == '__main__':
     print('Created networks in %0.3f sec' % (time2 - time1,))
 
     print('Matching...')
+    time1 = time.time()
     matcher = Matcher(a_net, b_net)
     matcher.match()
+    time2 = time.time()
+    print('Matched networks in %0.3f sec' % (time2 - time1,))
 
     qgs.exitQgis()
