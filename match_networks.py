@@ -186,6 +186,7 @@ class Matcher(object):
         self._b_network = b_network
 
         self._ab_node_node = {}
+        self._b_node_node = set()
         self._ab_node_edge = defaultdict(set)
         self._ba_node_edge = defaultdict(set)
         self._ab_edge_edge = defaultdict(set)
@@ -225,6 +226,7 @@ class Matcher(object):
         for (a_nid, b_nid) in ab.items():
             if ba.get(b_nid, None) == a_nid:
                 self._ab_node_node[a_nid] = b_nid
+                self._b_node_node.add(b_nid)
 
     def _match_nodes_to_edges(self):
         for (network, other_network) in self._networks():
@@ -271,7 +273,8 @@ class Matcher(object):
                     self._distance:
                 yield matches
         elif retries > 0:
-            if b_eids[-1] in self._ab_node_edge.get(a_nid, set()):
+            if b_eids[-1] in self._ab_node_edge.get(a_nid, set()) and \
+                    a_nid not in self._ab_node_node:
                 for a_eid in self._a_network.get_node_eids(a_nid):
                     if a_eid in a_eids or a_eid in self._ab_edge_edge:
                         continue
@@ -281,10 +284,8 @@ class Matcher(object):
                             a_other_nid, b_nid, a_new_eids, b_eids, matches,
                             retries - 1):
                         yield matches
-            # TODO: Using if instead of elif below allows us to match some
-            # edge cases where the edges form loops, but it substantially
-            # decreases performance.
-            if a_eids[-1] in self._ba_node_edge.get(b_nid, set()):
+            if a_eids[-1] in self._ba_node_edge.get(b_nid, set()) and \
+                    b_nid not in self._b_node_node:
                 for b_eid in self._b_network.get_node_eids(b_nid):
                     if b_eid in b_eids or b_eid in self._ba_edge_edge:
                         continue
