@@ -244,19 +244,24 @@ class Matcher(object):
             for a_eid in self._a_network.get_node_eids(a_nid):
                 if a_eid in self._ab_edge_edge:
                     continue
-                a_other_nid = self._a_network.get_other_nid(a_eid, a_nid)
+                a_end_nid = self._a_network.get_other_nid(a_eid, a_nid)
                 for b_eid in self._b_network.get_node_eids(b_nid):
-                    if a_eid in self._ab_edge_edge:
+                    if b_eid in self._ba_edge_edge:
                         continue
-                    b_other_nid = self._b_network.get_other_nid(b_eid, b_nid)
-                    for matches in self._iter_edge_matches(
-                            a_other_nid, b_other_nid, [a_eid], [b_eid], [],
-                            self._segments):
-                        for (a_eid, b_eid) in matches:
-                            self._ab_edge_edge[a_eid].add(b_eid)
-                            self._ba_edge_edge[b_eid].add(a_eid)
-                        # Only find one matching sequence per edge pair.
+                    b_end_nid = self._b_network.get_other_nid(b_eid, b_nid)
+                    if self._find_edge_to_edge_match(
+                            a_end_nid, b_end_nid, a_eid, b_eid):
                         break
+
+    def _find_edge_to_edge_match(self, a_end_nid, b_end_nid, a_eid, b_eid):
+        for matches in self._iter_edge_matches(
+                a_end_nid, b_end_nid, [a_eid], [b_eid], [], self._segments):
+            for (a_eid, b_eid) in matches:
+                self._ab_edge_edge[a_eid].add(b_eid)
+                self._ba_edge_edge[b_eid].add(a_eid)
+            # Only find one matching sequence per edge pair.
+            return True
+        return False
 
     def _iter_edge_matches(self, a_nid, b_nid, a_eids, b_eids, matches,
                            retries):
