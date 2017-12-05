@@ -187,8 +187,12 @@ class Matcher(object):
 
         self._ab_node_node = {}
         self._b_node_node = set()
+
         self._ab_node_edge = defaultdict(set)
         self._ba_node_edge = defaultdict(set)
+        self._ab_node_edge_dist = {}
+        self._ba_node_edge_dist = {}
+
         self._ab_edge_edge = defaultdict(set)
         self._ba_edge_edge = defaultdict(set)
 
@@ -239,7 +243,10 @@ class Matcher(object):
                     if distance <= self._distance:
                         node_edge = self._choose(
                             network, self._ab_node_edge, self._ba_node_edge)
+                        dist = self._choose(network, self._ab_node_edge_dist,
+                                            self._ba_node_edge_dist)
                         node_edge[nid].add(eid)
+                        dist[(nid, eid)] = distance
 
     def _match_edges_to_edges(self):
         for (a_nid, b_nid) in self._ab_node_node.items():
@@ -265,6 +272,37 @@ class Matcher(object):
             return True
         return False
 
+    def _state_endpoint_distance(self, a_nid, b_nid, a_eids, b_eids):
+        default_dist = self._distance + 1
+        ab_dist = self._ab_node_edge_dist.get(
+            (a_nid, b_eids[-1]), default_dist)
+        ba_dist = self._ba_node_edge_dist.get(
+            (b_nid, a_eids[-1]), default_dist)
+        return min(ab_dist, ba_dist)
+
+    def _get_next_states(self, a_nid, b_nid, a_eids, b_eids):
+        states = []
+        if b_eids[-1] in self._ab_node_edge.get(a_nid, set()) and \
+                a_nid not in self._ab_node_node:
+            for a_eid in self._a_network.get_node_eids(a_nid):
+                if a_eid in a_eids or a_eid in self._ab_edge_edge:
+                    continue
+                a_other_nid = self._a_network.get_other_nid(a_eid, a_nid)
+                a_new_eids = a_eids + [a_eid]
+                states.append((a_other_nid, b_nid, a_new_eids, b_eids))
+        if a_eids[-1] in self._ba_node_edge.get(b_nid, set()) and \
+                b_nid not in self._b_node_node:
+            for b_eid in self._b_network.get_node_eids(b_nid):
+                if b_eid in b_eids or b_eid in self._ba_edge_edge:
+                    continue
+                b_other_nid = self._b_network.get_other_nid(b_eid, b_nid)
+                b_new_eids = b_eids + [b_eid]
+                states.append((a_nid, b_other_nid, a_eids, b_new_eids))
+
+        state_dist = [
+            (self._state_endpoint_distance(*state), state) for state in states]
+        return [s for (d, s) in sorted(state_dist) if d <= self._distance]
+
     def _iter_edge_matches(self, a_nid, b_nid, a_eids, b_eids, matches,
                            retries):
         matches = matches + [(a_eids[-1], b_eids[-1])]
@@ -273,28 +311,11 @@ class Matcher(object):
                     self._distance:
                 yield matches
         elif retries > 0:
-            if b_eids[-1] in self._ab_node_edge.get(a_nid, set()) and \
-                    a_nid not in self._ab_node_node:
-                for a_eid in self._a_network.get_node_eids(a_nid):
-                    if a_eid in a_eids or a_eid in self._ab_edge_edge:
-                        continue
-                    a_other_nid = self._a_network.get_other_nid(a_eid, a_nid)
-                    a_new_eids = a_eids + [a_eid]
-                    for matches in self._iter_edge_matches(
-                            a_other_nid, b_nid, a_new_eids, b_eids, matches,
-                            retries - 1):
-                        yield matches
-            if a_eids[-1] in self._ba_node_edge.get(b_nid, set()) and \
-                    b_nid not in self._b_node_node:
-                for b_eid in self._b_network.get_node_eids(b_nid):
-                    if b_eid in b_eids or b_eid in self._ba_edge_edge:
-                        continue
-                    b_other_nid = self._b_network.get_other_nid(b_eid, b_nid)
-                    b_new_eids = b_eids + [b_eid]
-                    for matches in self._iter_edge_matches(
-                            a_nid, b_other_nid, a_eids, b_new_eids, matches,
-                            retries - 1):
-                        yield matches
+            for (a_nid, b_nid, a_eids, b_eids) in self._get_next_states(
+                    a_nid, b_nid, a_eids, b_eids):
+                for matches in self._iter_edge_matches(
+                        a_nid, b_nid, a_eids, b_eids, matches, retries - 1):
+                    yield matches
 
     def _sequence_hausdorff_distance(self, a_eids, b_eids):
         a_geom = self._combine_feature_geometries(
