@@ -276,7 +276,10 @@ class Matcher(object):
                             a_other_nid, b_nid, a_new_eids, b_eids, matches,
                             retries - 1):
                         yield matches
-            elif a_eids[-1] in self._ba_node_edge.get(b_nid, set()):
+            # TODO: Using if instead of elif below allows us to match some
+            # edge cases where the edges form loops, but it substantially
+            # decreases performance.
+            if a_eids[-1] in self._ba_node_edge.get(b_nid, set()):
                 for b_eid in self._b_network.get_node_eids(b_nid):
                     if b_eid in b_eids or b_eid in self._ba_edge_edge:
                         continue
@@ -327,5 +330,8 @@ if __name__ == '__main__':
 
     print('Writing matches...')
     matcher.write_matches(show_time=True)
+
+    print('A-B edge matches: %i ' % (len(matcher._ab_edge_edge),))
+    print('B-A edge matches: %i ' % (len(matcher._ba_edge_edge),))
 
     qgs.exitQgis()
