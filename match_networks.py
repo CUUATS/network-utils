@@ -192,6 +192,7 @@ class Matcher(object):
         self._ba_edge_edge = defaultdict(set)
 
         self._distance = kwargs.get('distance', 100)
+        self._segments = kwargs.get('segments', 20)
 
     def _networks(self):
         yield (self._a_network, self._b_network)
@@ -249,7 +250,8 @@ class Matcher(object):
                         continue
                     b_other_nid = self._b_network.get_other_nid(b_eid, b_nid)
                     for matches in self._iter_edge_matches(
-                            a_other_nid, b_other_nid, [a_eid], [b_eid], []):
+                            a_other_nid, b_other_nid, [a_eid], [b_eid], [],
+                            self._segments):
                         for (a_eid, b_eid) in matches:
                             self._ab_edge_edge[a_eid].add(b_eid)
                             self._ba_edge_edge[b_eid].add(a_eid)
@@ -257,7 +259,7 @@ class Matcher(object):
                         break
 
     def _iter_edge_matches(self, a_nid, b_nid, a_eids, b_eids, matches,
-                           retries=20):
+                           retries):
         matches = matches + [(a_eids[-1], b_eids[-1])]
         if self._ab_node_node.get(a_nid, None) == b_nid:
             if self._sequence_hausdorff_distance(a_eids, b_eids) <= \
