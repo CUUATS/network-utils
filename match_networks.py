@@ -6,13 +6,38 @@ from qgis.core import QgsApplication, QgsVectorLayer, QgsGeometry, \
 from PyQt5.QtCore import QVariant
 
 
+class timeable(object):
+
+    def __init__(self, action):
+        self._action = action
+
+    def __call__(self, method):
+
+        def timed(*args, **kwargs):
+            show_time = kwargs.get('show_time', False)
+            if 'show_time' in kwargs:
+                del kwargs['show_time']
+
+            if not show_time:
+                return method(*args, **kwargs)
+
+            start_time = time.time()
+            result = method(*args, **kwargs)
+            end_time = time.time()
+
+            print('%s in %0.3f sec' % (self._action, end_time - start_time))
+            return result
+
+        return timed
+
+
 class Network(object):
 
     FIELDS = [
         ('matches', QVariant.String),
         ('matches_count', QVariant.Int)]
 
-    def __init__(self, path):
+    def __init__(self, path, index_nodes=True):
         self._path = path
         self._layer = QgsVectorLayer(path)
 
@@ -25,12 +50,12 @@ class Network(object):
         self._node_index = QgsSpatialIndex()
         self._node_edges = defaultdict(set)
 
-        self._build_indexes()
+        self._build_indexes(index_nodes)
 
     def __repr__(self):
         return '<Network %s>' % (self._path,)
 
-    def _build_indexes(self):
+    def _build_indexes(self, index_nodes):
         next_node_id = 1
         coords_node = {}
 
@@ -49,7 +74,8 @@ class Network(object):
                     node_feature = self._make_feature(
                         node_id, QgsGeometry(point))
                     self._node_map[node_id] = node_feature
-                    self._node_index.insertFeature(node_feature)
+                    if index_nodes:
+                        self._node_index.insertFeature(node_feature)
 
                 endpoints.append(node_id)
                 self._node_edges[node_id].add(fid)
@@ -144,6 +170,12 @@ class Network(object):
 
 
 class Matcher(object):
+
+    @classmethod
+    @timeable('Created networks')
+    def from_paths(cls, a_path, b_path, **kwargs):
+        return cls(Network(a_path, index_nodes=False),
+                   Network(b_path), **kwargs)
 
     def __init__(self, a_network, b_network, **kwargs):
         for net in [a_network, b_network]:
@@ -267,11 +299,13 @@ class Matcher(object):
             geom = geom.combine(features.pop().geometry())
         return geom
 
+    @timeable('Matched')
     def match(self):
         self._match_nodes_to_nodes()
         self._match_nodes_to_edges()
         self._match_edges_to_edges()
 
+    @timeable('Wrote matches')
     def write_matches(self):
         self._a_network.write_matches(self._ab_edge_edge)
         self._b_network.write_matches(self._ba_edge_edge)
@@ -282,23 +316,14 @@ if __name__ == '__main__':
     qgs.initQgis()
 
     print('Creating networks...')
-    time1 = time.time()
-    a_net = Network('network.gpkg|layername=a_edge')
-    b_net = Network('network.gpkg|layername=b_edge')
-    time2 = time.time()
-    print('Created networks in %0.3f sec' % (time2 - time1,))
+    matcher = Matcher.from_paths(
+        'network.gpkg|layername=a_edge', 'network.gpkg|layername=b_edge',
+        show_time=True)
 
     print('Matching...')
-    time1 = time.time()
-    matcher = Matcher(a_net, b_net)
-    matcher.match()
-    time2 = time.time()
-    print('Matched in %0.3f sec' % (time2 - time1,))
+    matcher.match(show_time=True)
 
     print('Writing matches...')
-    time1 = time.time()
-    matcher.write_matches()
-    time2 = time.time()
-    print('Wrote matches in %0.3f sec' % (time2 - time1,))
+    matcher.write_matches(show_time=True)
 
     qgs.exitQgis()
